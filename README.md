@@ -1,0 +1,120 @@
+# gnafkit
+
+`gnafkit` is a Bun-based toolkit for:
+
+- downloading the latest public Australian G-NAF dataset
+- extracting and importing the PSV files into SQLite
+- serving a small HTTP API for geocoding, autocomplete, and validation
+
+The project is designed around a single-machine, read-heavy workflow:
+
+- first run automatically downloads the dataset if it is not already present
+- later runs reuse the local archive and extracted files when they still match the latest published release
+- `sync` checks for newer releases
+- `redownload` forces a clean dataset fetch and SQLite rebuild
+
+## Runtime
+
+The repo pins the Bun version with `mise`:
+
+```bash
+mise install
+```
+
+```bash
+bun src/cli.mts status
+```
+
+## Commands
+
+```bash
+# Show current dataset/database status
+bun run status
+
+# Download/extract/import if required
+bun run sync
+
+# Force a full re-download and rebuild
+bun run redownload
+
+# Start the API server, auto-syncing on first run
+bun run serve
+```
+
+CLI equivalents:
+
+```bash
+bun src/cli.mts serve --host 127.0.0.1 --port 3000
+bun src/cli.mts sync --force-download --force-import
+bun src/cli.mts redownload
+bun src/cli.mts status
+```
+
+## First-Run Behavior
+
+When you start `serve` or `sync`, `gnafkit` will:
+
+1. query the official `data.gov.au` CKAN metadata API
+2. resolve the latest `GDA2020` ZIP resource
+3. download the archive into `data/downloads/` if needed
+4. extract it into `data/extracted/<resource-id>/`
+5. import the required PSV files into `data/sqlite/gnaf.sqlite`
+
+The download and import stages provide terminal progress indicators.
+
+## API
+
+Default server address:
+
+```text
+http://127.0.0.1:3000
+```
+
+Endpoints:
+
+- `GET /health`
+- `GET /autocomplete?q=<text>&limit=10`
+- `GET /geocode?q=<full address>`
+- `GET /validate?q=<full address>`
+
+Examples:
+
+```bash
+curl 'http://127.0.0.1:3000/health'
+curl 'http://127.0.0.1:3000/autocomplete?q=120%20collins%20melb'
+curl 'http://127.0.0.1:3000/geocode?q=120%20Collins%20Street%20Melbourne%20VIC%203000'
+curl 'http://127.0.0.1:3000/validate?q=120%20Collins%20Street%20Melbourne%20VIC%203000'
+```
+
+## Architecture
+
+The source layout is intentionally small and explicit:
+
+- `src/cli.mts`: command parsing and top-level workflows
+- `src/gnaf/catalog.mts`: official release discovery
+- `src/gnaf/dataset.mts`: download and archive extraction
+- `src/gnaf/importer.mts`: PSV ingestion and SQLite build
+- `src/gnaf/queries.mts`: read-side SQL for API usage
+- `src/http/server.mts`: Bun HTTP server
+- `src/utils/`: PSV parsing, normalization, filesystem helpers
+
+SQLite is built in two layers:
+
+- raw normalized tables for the imported source records
+- a denormalized `search_addresses` table plus `FTS5` virtual table for API queries
+
+## Notes
+
+- The dataset is large. Expect the initial sync to take time and disk space.
+- The SQLite database is rebuilt atomically into a temporary file and swapped into place when import completes.
+- The importer currently targets the core PSV files required for address search, validation, and geocoding.
+
+## Verification
+
+Basic checks run locally:
+
+```bash
+bun test
+bunx tsc --noEmit
+bun src/cli.mts status
+```

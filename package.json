@@ -1,0 +1,21 @@
+{
+  "name": "gnafkit",
+  "module": "src/cli.mts",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "serve": "bun src/cli.mts serve",
+    "dev": "bun --watch src/cli.mts serve",
+    "sync": "bun src/cli.mts sync",
+    "redownload": "bun src/cli.mts sync --force-download --force-import",
+    "import": "bun src/cli.mts import",
+    "status": "bun src/cli.mts status",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  }
+}
