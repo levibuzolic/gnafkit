@@ -5,6 +5,9 @@ import { Spinner, ProgressBar } from "../terminal/progress.mts";
 import { ensureDir, pathExists, readJsonFile, removePath, writeJsonFile } from "../utils/fs.mts";
 import { resolveLatestDatasetResource, type DatasetResource } from "./catalog.mts";
 
+/**
+ * Persisted dataset state written to disk after a successful sync.
+ */
 interface DatasetState {
   current: {
     resource: DatasetResource;
@@ -15,6 +18,10 @@ interface DatasetState {
   } | null;
 }
 
+/**
+ * Runtime description of the local dataset paths and whether a sync operation
+ * performed fresh download/extraction work.
+ */
 export interface DatasetContext {
   resource: DatasetResource;
   zipPath: string;
@@ -23,10 +30,17 @@ export interface DatasetContext {
   extracted: boolean;
 }
 
+/**
+ * Options for dataset synchronization prior to import or serving.
+ */
 export interface DatasetSyncOptions {
   forceDownload?: boolean;
 }
 
+/**
+ * Maps a CKAN resource to the local archive and extraction paths used by the
+ * downloader/importer workflow.
+ */
 function getDatasetPaths(resource: DatasetResource): { zipPath: string; extractDir: string } {
   const fileName = basename(new URL(resource.url).pathname);
   return {
@@ -35,6 +49,11 @@ function getDatasetPaths(resource: DatasetResource): { zipPath: string; extractD
   };
 }
 
+/**
+ * Streams the remote ZIP archive to disk while updating the terminal progress
+ * bar. The file is first written to a temporary path and atomically renamed
+ * into place to avoid leaving a corrupt archive behind after interruptions.
+ */
 async function downloadDataset(url: string, destinationPath: string): Promise<void> {
   const response = await fetch(url);
   if (!response.ok || !response.body) {
@@ -69,6 +88,10 @@ async function downloadDataset(url: string, destinationPath: string): Promise<vo
   }
 }
 
+/**
+ * Runs a best-effort archive extraction command and returns stderr so callers
+ * can surface a useful error message if both extraction strategies fail.
+ */
 async function runExtractor(command: string[]): Promise<{ exitCode: number; stderr: string }> {
   try {
     const process = Bun.spawn({
@@ -88,6 +111,12 @@ async function runExtractor(command: string[]): Promise<{ exitCode: number; stde
   }
 }
 
+/**
+ * Extracts the downloaded archive into the managed extraction directory.
+ *
+ * `unzip` is preferred because it is ubiquitous and fast, while `ditto` acts
+ * as a macOS-friendly fallback.
+ */
 async function extractDataset(zipPath: string, extractDir: string): Promise<void> {
   await removePath(extractDir);
   await ensureDir(extractDir);
@@ -110,6 +139,17 @@ async function extractDataset(zipPath: string, extractDir: string): Promise<void
   spinner.stop("done");
 }
 
+/**
+ * Ensures the latest published G-NAF release is available on local disk.
+ *
+ * This handles three separate states:
+ * - resource discovery via the CKAN metadata API
+ * - archive download into `data/downloads`
+ * - archive extraction into `data/extracted`
+ *
+ * The persisted dataset state is used to avoid unnecessary work on normal
+ * server starts while still allowing a forced refresh.
+ */
 export async function syncDataset(options: DatasetSyncOptions = {}): Promise<DatasetContext> {
   const { forceDownload = false } = options;
   await ensureDir(DOWNLOADS_DIR);
@@ -161,6 +201,9 @@ export async function syncDataset(options: DatasetSyncOptions = {}): Promise<Dat
   };
 }
 
+/**
+ * Reads the persisted dataset state used by `status` and by future sync runs.
+ */
 export async function readDatasetState(): Promise<DatasetState | null> {
   return readJsonFile<DatasetState>(DATASET_STATE_PATH);
 }

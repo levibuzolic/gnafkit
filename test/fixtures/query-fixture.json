@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 2,
+  "exportedAt": "2026-03-03T06:19:38.438Z",
+  "sourceDatabasePath": "/Users/levi/src/levibuzolic/gnafkit/data/sqlite/gnaf.sqlite",
+  "sourceSql": "SELECT\n  address_detail_pid AS addressDetailPid,\n  full_address AS fullAddress,\n  normalized_address AS normalizedAddress,\n  street_name AS streetName,\n  locality_name AS localityName,\n  state_abbreviation AS stateAbbreviation,\n  postcode,\n  latitude,\n  longitude,\n  confidence,\n  geocode_type_code AS geocodeTypeCode\nFROM search_addresses\nWHERE\n  locality_name = 'MELBOURNE' AND\n  state_abbreviation = 'VIC' AND\n  postcode = '3000' AND\n  street_name = 'COLLINS STREET' AND\n  (\n    full_address = '106-120 COLLINS STREET MELBOURNE VIC 3000' OR\n    full_address LIKE 'FLAT % 120 COLLINS STREET MELBOURNE VIC 3000'\n  )\nORDER BY full_address, address_detail_pid\nLIMIT 32",
+  "totalRows": 22,
+  "sampleQueries": {
+    "autocomplete": {
+      "query": "120 Collins Street Melbourne VIC 3000",
+      "expectedAny": [
+        "106-120 COLLINS STREET MELBOURNE VIC 3000",
+        "FLAT 1 120 COLLINS STREET MELBOURNE VIC 3000"
+      ]
+    },
+    "geocode": {
+      "query": "FLAT 1 120 COLLINS STREET MELBOURNE VIC 3000",
+      "expectedFirst": "FLAT 1 120 COLLINS STREET MELBOURNE VIC 3000"
+    },
+    "reverseGeocode": {
+      "latitude": -37.81409428,
+      "longitude": 144.96897819,
+      "expectedAny": [
+        "106-120 COLLINS STREET MELBOURNE VIC 3000",
+        "FLAT 1 120 COLLINS STREET MELBOURNE VIC 3000"
+      ],
+      "maxDistanceMeters": 20
+    }
+  }
+}

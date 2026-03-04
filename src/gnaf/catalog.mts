@@ -1,5 +1,8 @@
 import { GNAF_PACKAGE_ID } from "../config.mts";
 
+/**
+ * Minimal metadata for the currently selected downloadable G-NAF release.
+ */
 export interface DatasetResource {
   id: string;
   name: string;
@@ -8,6 +11,10 @@ export interface DatasetResource {
   lastModified: string | null;
 }
 
+/**
+ * Shape of the CKAN `package_show` response used to resolve the latest G-NAF
+ * ZIP resource from `data.gov.au`.
+ */
 interface CkanResponse {
   success: boolean;
   result: {
@@ -22,6 +29,14 @@ interface CkanResponse {
   };
 }
 
+/**
+ * Resolves the newest public G-NAF GDA2020 ZIP from the official CKAN package
+ * metadata on `data.gov.au`.
+ *
+ * The implementation intentionally discovers the active resource at runtime
+ * rather than baking a release URL into the codebase, so `sync` can track new
+ * quarterly releases without requiring a code change.
+ */
 export async function resolveLatestDatasetResource(): Promise<DatasetResource> {
   const response = await fetch(
     `https://data.gov.au/data/api/3/action/package_show?id=${encodeURIComponent(GNAF_PACKAGE_ID)}`,

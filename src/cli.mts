@@ -5,6 +5,9 @@ import { openReadonlyDatabase, readDatabaseMetadata } from "./gnaf/queries.mts";
 import { startServer } from "./http/server.mts";
 import { pathExists } from "./utils/fs.mts";
 
+/**
+ * Parsed command-line arguments for the Bun CLI entrypoint.
+ */
 interface ParsedArgs {
   command: string;
   forceDownload: boolean;
@@ -13,6 +16,13 @@ interface ParsedArgs {
   port?: number;
 }
 
+/**
+ * Parses the CLI shape used by `gnafkit`.
+ *
+ * The parser is intentionally small and explicit because the available commands
+ * are limited and tightly coupled to the dataset lifecycle:
+ * downloading, importing, serving, and inspecting status.
+ */
 function parseArgs(argv: string[]): ParsedArgs {
   const [command = "serve", ...rest] = argv;
   if (command === "--help" || command === "-h" || command === "help") {
@@ -55,6 +65,9 @@ function parseArgs(argv: string[]): ParsedArgs {
   return { command, forceDownload, forceImport, host, port };
 }
 
+/**
+ * Prints the supported command surface for the Bun entrypoint.
+ */
 function printHelp(): void {
   console.log(`gnafkit
 
@@ -76,6 +89,10 @@ Commands:
 `);
 }
 
+/**
+ * Emits a JSON status payload describing the resolved dataset metadata and the
+ * currently active SQLite database, if one has been built.
+ */
 async function handleStatus(): Promise<void> {
   const datasetState = await readDatasetState();
   const databaseExists = await pathExists(DB_PATH);
@@ -98,6 +115,13 @@ async function handleStatus(): Promise<void> {
   }, null, 2));
 }
 
+/**
+ * Dispatches the top-level CLI command.
+ *
+ * `serve` and `sync` both guarantee that the current dataset has been resolved
+ * and imported before control returns, which keeps callers from needing to
+ * reason about partial initialization states.
+ */
 async function main(): Promise<void> {
   const args = parseArgs(Bun.argv.slice(2));
 

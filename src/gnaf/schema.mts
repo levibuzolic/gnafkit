@@ -69,6 +69,19 @@ CREATE TABLE search_addresses (
   geocode_type_code TEXT
 );
 
+CREATE TABLE reverse_geocode_points (
+  id INTEGER PRIMARY KEY,
+  address_detail_pid TEXT NOT NULL UNIQUE
+);
+
+CREATE VIRTUAL TABLE reverse_geocode_rtree USING rtree(
+  id,
+  min_longitude,
+  max_longitude,
+  min_latitude,
+  max_latitude
+);
+
 CREATE VIRTUAL TABLE search_fts USING fts5(
   address_detail_pid UNINDEXED,
   full_address,

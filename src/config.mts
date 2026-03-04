@@ -14,6 +14,7 @@ export const DATASET_STATE_PATH = join(STATE_DIR, "dataset.json");
 export const DEFAULT_HOST = "127.0.0.1";
 export const DEFAULT_PORT = 3000;
 export const IMPORT_BATCH_SIZE = 5_000;
+export const SCHEMA_VERSION = 2;
 
 export const PSV_FILE_PATTERNS = {
   state: /^[A-Z]{2,3}_STATE_psv\.psv$/,

@@ -4,7 +4,7 @@
 
 - downloading the latest public Australian G-NAF dataset
 - extracting and importing the PSV files into SQLite
-- serving a small HTTP API for geocoding, autocomplete, and validation
+- serving a small HTTP API for geocoding, reverse geocoding, and autocomplete
 
 The project is designed around a single-machine, read-heavy workflow:
 
@@ -75,7 +75,7 @@ Endpoints:
 - `GET /health`
 - `GET /autocomplete?q=<text>&limit=10`
 - `GET /geocode?q=<full address>`
-- `GET /validate?q=<full address>`
+- `GET /reverse-geocode?lat=<latitude>&lng=<longitude>&limit=5`
 
 Examples:
 
@@ -83,7 +83,7 @@ Examples:
 curl 'http://127.0.0.1:3000/health'
 curl 'http://127.0.0.1:3000/autocomplete?q=120%20collins%20melb'
 curl 'http://127.0.0.1:3000/geocode?q=120%20Collins%20Street%20Melbourne%20VIC%203000'
-curl 'http://127.0.0.1:3000/validate?q=120%20Collins%20Street%20Melbourne%20VIC%203000'
+curl 'http://127.0.0.1:3000/reverse-geocode?lat=-37.81409&lng=144.96898'
 ```
 
 ## Architecture
@@ -107,7 +107,8 @@ SQLite is built in two layers:
 
 - The dataset is large. Expect the initial sync to take time and disk space.
 - The SQLite database is rebuilt atomically into a temporary file and swapped into place when import completes.
-- The importer currently targets the core PSV files required for address search, validation, and geocoding.
+- The importer currently targets the core PSV files required for address search and geocoding.
+- Reverse geocoding uses SQLite `rtree` plus runtime distance calculation. A full GIS extension is not required for the current scope.
 
 ## Verification
 
@@ -117,4 +118,21 @@ Basic checks run locally:
 bun test
 bunx tsc --noEmit
 bun src/cli.mts status
+```
+
+## Test Fixtures
+
+Default tests use a tiny checked-in SQLite fixture under `test/fixtures/` so CI does not need to download the full G-NAF dataset.
+
+Re-export that fixture from a fully rebuilt local database with:
+
+```bash
+bun run fixture:export
+```
+
+If you want to run the live national-database query tests as well:
+
+```bash
+bun run sync
+bun run test:real-db
 ```

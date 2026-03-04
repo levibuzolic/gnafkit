@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { rename } from "node:fs/promises";
-import { DB_PATH, IMPORT_BATCH_SIZE, PSV_FILE_PATTERNS, SQLITE_DIR } from "../config.mts";
+import { DB_PATH, IMPORT_BATCH_SIZE, PSV_FILE_PATTERNS, SCHEMA_VERSION, SQLITE_DIR } from "../config.mts";
 import { ProgressBar, Spinner } from "../terminal/progress.mts";
 import { ensureDir, findFilesByNamePattern, pathExists, removePath } from "../utils/fs.mts";
 import { joinNonEmpty, normalizeSearchText } from "../utils/strings.mts";
@@ -8,16 +8,27 @@ import { streamPsvRows } from "../utils/psv.mts";
 import { INDEX_SQL, RAW_SCHEMA_SQL } from "./schema.mts";
 import { syncDataset, type DatasetContext } from "./dataset.mts";
 
+/**
+ * Import orchestration flags used by the CLI and server startup.
+ */
 interface ImportOptions {
   forceDownload?: boolean;
   forceImport?: boolean;
 }
 
+/**
+ * Metadata read from an existing SQLite database to determine whether the
+ * current dataset and schema version have already been imported.
+ */
 interface ImportMetadata {
   resourceId: string;
   importedAt: string;
+  schemaVersion: string;
 }
 
+/**
+ * Batch writer callback used to flush mapped PSV rows inside a transaction.
+ */
 type BatchWriter<T> = (rows: T[]) => void;
 
 function get(row: Record<string, string>, key: string): string {
@@ -75,6 +86,13 @@ function composeAddress(row: {
   return joinNonEmpty([prefix, streetPart, row.localityName, row.stateAbbreviation, row.postcode]);
 }
 
+/**
+ * Opens the writable SQLite database with import-oriented pragmas.
+ *
+ * These pragmas trade some durability during the build phase for substantially
+ * better write throughput. The rebuilt database is finalized and swapped into
+ * place only after the import completes successfully.
+ */
 function openDatabase(path: string): Database {
   const db = new Database(path, { create: true, strict: true });
   db.run("PRAGMA journal_mode = WAL");
@@ -83,22 +101,27 @@ function openDatabase(path: string): Database {
   return db;
 }
 
+/**
+ * Reads the resource metadata from an existing SQLite file so we can decide
+ * whether a new import is necessary for the currently resolved dataset.
+ */
 function readImportMetadata(dbPath: string): ImportMetadata | null {
   let db: Database | null = null;
   try {
     db = new Database(dbPath, { readonly: true });
     const rows = db
-      .query<{ key: string; value: string }, []>("SELECT key, value FROM metadata WHERE key IN ('resource_id', 'imported_at')")
+      .query<{ key: string; value: string }, []>("SELECT key, value FROM metadata WHERE key IN ('resource_id', 'imported_at', 'schema_version')")
       .all();
 
     const map = new Map(rows.map((row) => [row.key, row.value]));
     const resourceId = map.get("resource_id");
     const importedAt = map.get("imported_at");
-    if (!resourceId || !importedAt) {
+    const schemaVersion = map.get("schema_version");
+    if (!resourceId || !importedAt || !schemaVersion) {
       return null;
     }
 
-    return { resourceId, importedAt };
+    return { resourceId, importedAt, schemaVersion };
   } catch {
     return null;
   } finally {
@@ -106,6 +129,10 @@ function readImportMetadata(dbPath: string): ImportMetadata | null {
   }
 }
 
+/**
+ * Streams a PSV file, maps each row into a typed import payload, and writes it
+ * in transaction-sized batches to keep memory bounded and SQLite fast.
+ */
 async function withBatchedRows<T>(
   path: string,
   label: string,
@@ -139,6 +166,10 @@ async function withBatchedRows<T>(
   progress.finish();
 }
 
+/**
+ * Applies the same row-mapping/import routine across all shard files for a
+ * table family, such as the per-state `ADDRESS_DETAIL` files.
+ */
 async function importManyFiles<T>(
   paths: string[],
   label: string,
@@ -151,6 +182,14 @@ async function importManyFiles<T>(
   }
 }
 
+/**
+ * Imports the normalized source tables that mirror the core G-NAF entities
+ * required by this tool: states, localities, streets, addresses, and default
+ * geocodes.
+ *
+ * These tables preserve enough structure to support future query refinement,
+ * while still being simple enough to rebuild from scratch on each release.
+ */
 async function importRawTables(db: Database, dataset: DatasetContext): Promise<void> {
   const statePaths = await findFilesByNamePattern(dataset.extractDir, PSV_FILE_PATTERNS.state);
   const localityPaths = await findFilesByNamePattern(dataset.extractDir, PSV_FILE_PATTERNS.locality);
@@ -398,6 +437,12 @@ async function importRawTables(db: Database, dataset: DatasetContext): Promise<v
   );
 }
 
+/**
+ * Builds the denormalized read model used by the HTTP API.
+ *
+ * `search_addresses` stores the final address strings and lookup attributes,
+ * while the FTS table supports prefix-style autocomplete queries.
+ */
 function buildSearchSurface(db: Database): void {
   const totalRow = db.query<{ total: number }, []>("SELECT COUNT(*) AS total FROM addresses").get();
   const total = totalRow?.total ?? 0;
@@ -405,6 +450,12 @@ function buildSearchSurface(db: Database): void {
 
   const insertSearchAddress = db.prepare(
     "INSERT OR REPLACE INTO search_addresses (address_detail_pid, full_address, normalized_address, street_name, locality_name, state_abbreviation, postcode, latitude, longitude, confidence, geocode_type_code) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  );
+  const insertReversePoint = db.prepare(
+    "INSERT INTO reverse_geocode_points (address_detail_pid) VALUES (?)",
+  );
+  const insertReverseRtree = db.prepare(
+    "INSERT INTO reverse_geocode_rtree (id, min_longitude, max_longitude, min_latitude, max_latitude) VALUES (?, ?, ?, ?, ?)",
   );
   const insertSearchFts = db.prepare(
     "INSERT INTO search_fts (address_detail_pid, full_address, street_name, locality_name, postcode) VALUES (?, ?, ?, ?, ?)",
@@ -439,6 +490,11 @@ function buildSearchSurface(db: Database): void {
           row.confidence,
           row.geocodeTypeCode,
         );
+        if (row.latitude !== null && row.longitude !== null) {
+          const pointInsert = insertReversePoint.run(row.pid);
+          const pointId = Number(pointInsert.lastInsertRowid);
+          insertReverseRtree.run(pointId, row.longitude, row.longitude, row.latitude, row.latitude);
+        }
         insertSearchFts.run(
           row.pid,
           row.fullAddress,
@@ -553,6 +609,13 @@ function buildSearchSurface(db: Database): void {
   progress.finish();
 }
 
+/**
+ * Rebuilds the SQLite database from the extracted dataset into a temporary file
+ * and atomically swaps it into place when the import completes.
+ *
+ * This keeps the existing database usable during long imports and avoids
+ * exposing a partially built database to the API server.
+ */
 async function rebuildDatabase(dataset: DatasetContext): Promise<void> {
   await ensureDir(SQLITE_DIR);
   const temporaryDbPath = `${DB_PATH}.tmp`;
@@ -570,6 +633,7 @@ async function rebuildDatabase(dataset: DatasetContext): Promise<void> {
   db.prepare("INSERT INTO metadata (key, value) VALUES (?, ?)").run("resource_id", dataset.resource.id);
   db.prepare("INSERT INTO metadata (key, value) VALUES (?, ?)").run("resource_name", dataset.resource.name);
   db.prepare("INSERT INTO metadata (key, value) VALUES (?, ?)").run("imported_at", new Date().toISOString());
+  db.prepare("INSERT INTO metadata (key, value) VALUES (?, ?)").run("schema_version", String(SCHEMA_VERSION));
   db.run("PRAGMA wal_checkpoint(TRUNCATE)");
   db.run("PRAGMA journal_mode = DELETE");
   db.close();
@@ -578,6 +642,12 @@ async function rebuildDatabase(dataset: DatasetContext): Promise<void> {
   await rename(temporaryDbPath, DB_PATH);
 }
 
+/**
+ * Ensures the local SQLite database matches the latest resolved dataset.
+ *
+ * This is the main orchestration entrypoint used by both the CLI sync commands
+ * and the HTTP server startup path.
+ */
 export async function ensureDatabaseReady(options: ImportOptions = {}): Promise<DatasetContext> {
   const dataset = await syncDataset({ forceDownload: options.forceDownload });
   const metadata = (await pathExists(DB_PATH)) ? readImportMetadata(DB_PATH) : null;
@@ -585,7 +655,8 @@ export async function ensureDatabaseReady(options: ImportOptions = {}): Promise<
     options.forceImport ||
     !(await pathExists(DB_PATH)) ||
     !metadata ||
-    metadata.resourceId !== dataset.resource.id;
+    metadata.resourceId !== dataset.resource.id ||
+    metadata.schemaVersion !== String(SCHEMA_VERSION);
 
   if (needsImport) {
     await rebuildDatabase(dataset);

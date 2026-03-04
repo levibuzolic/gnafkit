@@ -10,7 +10,9 @@
     "redownload": "bun src/cli.mts sync --force-download --force-import",
     "import": "bun src/cli.mts import",
     "status": "bun src/cli.mts status",
-    "test": "bun test"
+    "test": "bun test",
+    "test:real-db": "GNAFKIT_TEST_REAL_DB=1 bun test src/gnaf/queries.real-db.test.mts",
+    "fixture:export": "bun src/testing/export-query-fixture.mts"
   },
   "devDependencies": {
     "@types/bun": "latest"

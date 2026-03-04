@@ -1,3 +1,6 @@
+/**
+ * Generic PSV row keyed by header name.
+ */
 type PsvRow = Record<string, string>;
 
 export function parsePsvLine(line: string): string[] {
