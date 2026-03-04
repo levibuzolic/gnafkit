@@ -59,6 +59,37 @@ const levelLikeTokens = [
   "lv",
 ];
 
+const defaultStreetTypePairs = [
+  ["alley", "ally"],
+  ["arcade", "arc"],
+  ["avenue", "ave"],
+  ["boulevard", "bvd"],
+  ["close", "cl"],
+  ["court", "ct"],
+  ["crescent", "cres"],
+  ["drive", "dr"],
+  ["grove", "gr"],
+  ["highway", "hwy"],
+  ["lane", "ln"],
+  ["parade", "pde"],
+  ["place", "pl"],
+  ["road", "rd"],
+  ["square", "sq"],
+  ["street", "st"],
+  ["terrace", "tce"],
+] as const;
+
+const defaultStreetSuffixPairs = [
+  ["east", "e"],
+  ["north", "n"],
+  ["north east", "ne"],
+  ["north west", "nw"],
+  ["south", "s"],
+  ["south east", "se"],
+  ["south west", "sw"],
+  ["west", "w"],
+] as const;
+
 let cachedExtractDir: string | null = null;
 let cachedAliasData: AddressAliasData | null = null;
 
@@ -117,6 +148,27 @@ function addAlternative(map: Map<string, Set<string>>, token: string, alternativ
   map.get(normalizedToken)!.add(normalizedAlternative);
 }
 
+function seedDefaultAlternatives(
+  alternatives: Map<string, Set<string>>,
+  canonicalByToken: Map<string, string>,
+  streetTypeAbbreviationByFull: Map<string, string>,
+  streetSuffixAbbreviationByFull: Map<string, string>,
+): void {
+  for (const [full, abbreviation] of defaultStreetTypePairs) {
+    addAlternative(alternatives, full, abbreviation);
+    addAlternative(alternatives, abbreviation, full);
+    canonicalByToken.set(abbreviation, full);
+    streetTypeAbbreviationByFull.set(full, abbreviation);
+  }
+
+  for (const [full, abbreviation] of defaultStreetSuffixPairs) {
+    addAlternative(alternatives, full, abbreviation);
+    addAlternative(alternatives, abbreviation, full);
+    canonicalByToken.set(abbreviation, full);
+    streetSuffixAbbreviationByFull.set(full, abbreviation);
+  }
+}
+
 function buildAddressAliasData(extractDir: string): AddressAliasData {
   const flatTypesPath = findFirstFileByPattern(extractDir, /^Authority_Code_FLAT_TYPE_AUT_psv\.psv$/);
   const levelTypesPath = findFirstFileByPattern(extractDir, /^Authority_Code_LEVEL_TYPE_AUT_psv\.psv$/);
@@ -131,6 +183,13 @@ function buildAddressAliasData(extractDir: string): AddressAliasData {
   const canonicalByToken = new Map<string, string>();
   const streetTypeAbbreviationByFull = new Map<string, string>();
   const streetSuffixAbbreviationByFull = new Map<string, string>();
+
+  seedDefaultAlternatives(
+    alternatives,
+    canonicalByToken,
+    streetTypeAbbreviationByFull,
+    streetSuffixAbbreviationByFull,
+  );
 
   for (const row of readAuthorityRows(streetTypesPath)) {
     const full = normalizeSearchText(row.CODE);
@@ -188,11 +247,25 @@ function getCurrentExtractDir(): string | null {
 function getAliasData(): AddressAliasData {
   const extractDir = getCurrentExtractDir();
   if (!extractDir) {
+    const alternatives = new Map<string, Set<string>>();
+    const canonicalByToken = new Map<string, string>();
+    const streetTypeAbbreviationByFull = new Map<string, string>();
+    const streetSuffixAbbreviationByFull = new Map<string, string>();
+
+    seedDefaultAlternatives(
+      alternatives,
+      canonicalByToken,
+      streetTypeAbbreviationByFull,
+      streetSuffixAbbreviationByFull,
+    );
+
     return {
-      tokenAlternatives: new Map(),
-      canonicalByToken: new Map(),
-      streetTypeAbbreviationByFull: new Map(),
-      streetSuffixAbbreviationByFull: new Map(),
+      tokenAlternatives: new Map(
+        [...alternatives.entries()].map(([token, values]) => [token, [...values].sort((left, right) => left.localeCompare(right))]),
+      ),
+      canonicalByToken,
+      streetTypeAbbreviationByFull,
+      streetSuffixAbbreviationByFull,
       unitLikeTokens: new Set(unitLikeTokens),
       levelLikeTokens: new Set(levelLikeTokens),
     };
