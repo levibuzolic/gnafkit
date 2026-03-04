@@ -3,7 +3,7 @@ import { Database, type Database as DatabaseType } from "bun:sqlite";
 import { join } from "node:path";
 import { SCHEMA_VERSION } from "../config.mts";
 import { pathExists, readJsonFile } from "../utils/fs.mts";
-import { autocomplete, geocode, reverseGeocode } from "./queries.mts";
+import { autocomplete, geocode } from "./queries.mts";
 
 const FIXTURE_DB_PATH = join(process.cwd(), "test", "fixtures", "query-fixture.sqlite");
 const FIXTURE_MANIFEST_PATH = join(process.cwd(), "test", "fixtures", "query-fixture.json");
@@ -26,12 +26,6 @@ interface QueryFixtureManifest {
     geocode: {
       query: string;
       expectedFirst: string;
-    };
-    reverseGeocode: {
-      latitude: number;
-      longitude: number;
-      expectedAny: string[];
-      maxDistanceMeters: number;
     };
   };
 }
@@ -96,14 +90,5 @@ describe("fixture-backed query lookups", () => {
 
     expect(results.length).toBeGreaterThan(0);
     expect(results[0]?.fullAddress).toBe(manifest.sampleQueries.geocode.expectedFirst);
-  });
-
-  test("reverse geocode returns the expected nearby fixture addresses", () => {
-    const reverseSample = manifest.sampleQueries.reverseGeocode;
-    const results = reverseGeocode(db, reverseSample.latitude, reverseSample.longitude, 5);
-
-    expect(results.length).toBeGreaterThan(0);
-    expect(results[0]?.distanceMeters).toBeLessThan(reverseSample.maxDistanceMeters);
-    expect(reverseSample.expectedAny.some((expectedAddress) => results.some((result) => result.fullAddress === expectedAddress))).toBe(true);
   });
 });

@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
 import { DB_PATH } from "../config.mts";
 import { buildAddressFtsPrefixQueries, extractLeadingSubpremise, normalizeAddressInput, streetNameVariants } from "./address-aliases.mts";
 
@@ -16,14 +17,6 @@ export interface AddressRecord {
   longitude: number | null;
   confidence: number | null;
   geocodeTypeCode: string | null;
-}
-
-/**
- * Reverse-geocode result augmented with runtime-calculated distance from the
- * query coordinate.
- */
-export interface ReverseGeocodeRecord extends AddressRecord {
-  distanceMeters: number;
 }
 
 const STATE_ABBREVIATIONS = new Set(["ACT", "NSW", "NT", "OT", "QLD", "SA", "TAS", "VIC", "WA"]);
@@ -160,22 +153,8 @@ function rankCandidates(query: string, candidates: AddressRecord[]): AddressReco
   });
 }
 
-function toRadians(value: number): number {
-  return (value * Math.PI) / 180;
-}
-
-function haversineDistanceMeters(latitudeA: number, longitudeA: number, latitudeB: number, longitudeB: number): number {
-  const earthRadiusMeters = 6_371_000;
-  const dLat = toRadians(latitudeB - latitudeA);
-  const dLng = toRadians(longitudeB - longitudeA);
-  const latA = toRadians(latitudeA);
-  const latB = toRadians(latitudeB);
-
-  const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(latA) * Math.cos(latB) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
-
-  return 2 * earthRadiusMeters * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+function hashNormalizedAddress(value: string): Uint8Array {
+  return createHash("sha256").update(value).digest().subarray(0, 8);
 }
 
 /**
@@ -216,7 +195,7 @@ export function autocomplete(
         s.confidence AS confidence,
         s.geocode_type_code AS geocodeTypeCode
       FROM search_fts f
-      INNER JOIN search_addresses s ON s.address_detail_pid = f.address_detail_pid
+      INNER JOIN search_addresses s ON s.rowid = f.rowid
       WHERE search_fts MATCH ?
       ORDER BY bm25(search_fts, 2.0, 1.0, 0.8, 0.4), s.confidence DESC, s.full_address
       LIMIT ?`,
@@ -251,7 +230,7 @@ export function geocode(
   }
 
   const exact = db
-    .query<AddressRecord, [string, number]>(
+    .query<AddressRecord, [Uint8Array, string, number]>(
       `SELECT
         address_detail_pid AS addressDetailPid,
         full_address AS fullAddress,
@@ -264,11 +243,11 @@ export function geocode(
         confidence,
         geocode_type_code AS geocodeTypeCode
       FROM search_addresses
-      WHERE normalized_address = ?
+      WHERE normalized_address_hash = ? AND normalized_address = ?
       ORDER BY confidence DESC, full_address
       LIMIT ?`,
     )
-    .all(normalized, limit);
+    .all(hashNormalizedAddress(normalized), normalized, limit);
 
   if (exact.length > 0) {
     return exact;
@@ -276,90 +255,6 @@ export function geocode(
 
   return rankCandidates(query, autocomplete(db, query, Math.max(limit, 25))).slice(0, limit);
 }
-
-/**
- * Finds the nearest known addresses to a latitude/longitude pair.
- *
- * SQLite's R-tree is used to cheaply gather nearby candidates. The final
- * ranking uses Haversine distance in the runtime so we do not need a dedicated
- * GIS extension for nearest-neighbor lookups.
- */
-export function reverseGeocode(
-  db: Database,
-  latitude: number,
-  longitude: number,
-  limit = 5,
-): ReverseGeocodeRecord[] {
-  const candidateStatement = db.query<
-    AddressRecord & { id: number },
-    [number, number, number, number, number]
-  >(
-    `SELECT
-      p.id AS id,
-      s.address_detail_pid AS addressDetailPid,
-      s.full_address AS fullAddress,
-      s.street_name AS streetName,
-      s.locality_name AS localityName,
-      s.state_abbreviation AS stateAbbreviation,
-      s.postcode AS postcode,
-      s.latitude AS latitude,
-      s.longitude AS longitude,
-      s.confidence AS confidence,
-      s.geocode_type_code AS geocodeTypeCode
-    FROM reverse_geocode_rtree r
-    INNER JOIN reverse_geocode_points p ON p.id = r.id
-    INNER JOIN search_addresses s ON s.address_detail_pid = p.address_detail_pid
-    WHERE
-      r.min_longitude >= ? AND
-      r.max_longitude <= ? AND
-      r.min_latitude >= ? AND
-      r.max_latitude <= ?
-    LIMIT ?`,
-  );
-
-  const radii = [0.0005, 0.002, 0.01, 0.05];
-  const desiredCandidates = Math.max(limit * 10, 25);
-  let candidates: Array<AddressRecord & { id: number }> = [];
-
-  for (const radius of radii) {
-    candidates = candidateStatement.all(
-      longitude - radius,
-      longitude + radius,
-      latitude - radius,
-      latitude + radius,
-      desiredCandidates,
-    );
-
-    if (candidates.length >= limit) {
-      break;
-    }
-  }
-
-  return candidates
-    .filter((candidate) => candidate.latitude !== null && candidate.longitude !== null)
-    .map((candidate) => ({
-      addressDetailPid: candidate.addressDetailPid,
-      fullAddress: candidate.fullAddress,
-      streetName: candidate.streetName,
-      localityName: candidate.localityName,
-      stateAbbreviation: candidate.stateAbbreviation,
-      postcode: candidate.postcode,
-      latitude: candidate.latitude,
-      longitude: candidate.longitude,
-      confidence: candidate.confidence,
-      geocodeTypeCode: candidate.geocodeTypeCode,
-      distanceMeters: haversineDistanceMeters(latitude, longitude, candidate.latitude!, candidate.longitude!),
-    }))
-    .sort((left, right) => {
-      if (left.distanceMeters !== right.distanceMeters) {
-        return left.distanceMeters - right.distanceMeters;
-      }
-
-      return (right.confidence ?? -1) - (left.confidence ?? -1);
-    })
-    .slice(0, limit);
-}
-
 /**
  * Returns the database metadata table as a plain object for diagnostics and
  * health reporting.

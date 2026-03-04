@@ -424,35 +424,6 @@ export function homepageResponse(): Response {
             <p class="meta">No request sent yet.</p>
           </div>
         </article>
-
-        <article class="panel">
-          <h2>Reverse Geocode</h2>
-          <div class="endpoint">GET /reverse-geocode</div>
-          <p>Find nearby addresses for a latitude and longitude pair.</p>
-          <form data-endpoint="/reverse-geocode">
-            <label>
-              <span class="field-label">Latitude</span>
-              <input name="lat" type="number" step="any" value="-37.81409" required />
-            </label>
-            <label>
-              <span class="field-label">Longitude</span>
-              <input name="lng" type="number" step="any" value="144.96898" required />
-            </label>
-            <label>
-              <span class="field-label">Limit</span>
-              <input name="limit" type="number" min="1" max="20" value="5" />
-            </label>
-            <div class="actions">
-              <button class="primary-button" type="submit">Find nearest addresses</button>
-              <button class="secondary-button" type="button" data-copy-curl>Copy curl</button>
-            </div>
-            <div class="copy-status" data-copy-status></div>
-          </form>
-          <div class="result" data-result>
-            <p class="status">Ready</p>
-            <p class="meta">No request sent yet.</p>
-          </div>
-        </article>
       </section>
 
       <section class="docs">
@@ -493,15 +464,6 @@ export function homepageResponse(): Response {
             <div class="doc-example"><code>/geocode?q=120%20Collins%20Street%20Melbourne%20VIC%203000</code></div>
           </article>
 
-          <article class="doc-card">
-            <h3><code>GET /reverse-geocode</code></h3>
-            <div class="doc-list">
-              <p><strong><code>lat</code></strong>: required latitude.</p>
-              <p><strong><code>lng</code></strong>: required longitude.</p>
-              <p><strong><code>limit</code></strong>: optional, defaults to <code>5</code>.</p>
-            </div>
-            <div class="doc-example"><code>/reverse-geocode?lat=-37.81409&amp;lng=144.96898&amp;limit=5</code></div>
-          </article>
         </div>
       </section>
     </main>
@@ -549,12 +511,10 @@ export function homepageResponse(): Response {
         const coords = record.latitude != null && record.longitude != null
           ? record.latitude.toFixed(6) + ", " + record.longitude.toFixed(6)
           : "No coordinates";
-        const distance = record.distanceMeters != null ? "Distance " + formatNumber(record.distanceMeters) + " m" : null;
-
         return '<div class="result-item">' +
           '<p class="title">' + escapeHtml(record.fullAddress || "Unnamed result") + '</p>' +
           '<p class="meta">' + escapeHtml(location || "Location unavailable") + '</p>' +
-          '<p class="meta">Coordinates: ' + escapeHtml(coords) + (distance ? " • " + escapeHtml(distance) : "") + '</p>' +
+          '<p class="meta">Coordinates: ' + escapeHtml(coords) + '</p>' +
           '</div>';
       }
 

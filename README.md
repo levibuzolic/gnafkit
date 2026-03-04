@@ -4,7 +4,7 @@
 
 - downloading the latest public Australian G-NAF dataset
 - extracting and importing the PSV files into SQLite
-- serving a small HTTP API for geocoding, reverse geocoding, and autocomplete
+- serving a small HTTP API for geocoding and autocomplete
 
 The project is designed around a single-machine, read-heavy workflow:
 
@@ -75,7 +75,6 @@ Endpoints:
 - `GET /health`
 - `GET /autocomplete?q=<text>&limit=10`
 - `GET /geocode?q=<full address>`
-- `GET /reverse-geocode?lat=<latitude>&lng=<longitude>&limit=5`
 
 Examples:
 
@@ -83,7 +82,6 @@ Examples:
 curl 'http://127.0.0.1:3000/health'
 curl 'http://127.0.0.1:3000/autocomplete?q=120%20collins%20melb'
 curl 'http://127.0.0.1:3000/geocode?q=120%20Collins%20Street%20Melbourne%20VIC%203000'
-curl 'http://127.0.0.1:3000/reverse-geocode?lat=-37.81409&lng=144.96898'
 ```
 
 ## Deployment Notes
@@ -119,6 +117,32 @@ bun src/cli.mts serve --host 0.0.0.0 --port ${PORT:-3000}
 
 That means local development still uses the normal sync/import workflow, while deployment can mount a prebuilt database directly.
 
+### Building DB Artifacts In GitHub Actions
+
+The repository includes a manual workflow at `.github/workflows/build-db.yml` that:
+
+- runs `bun run sync`
+- captures dataset/database metadata
+- compresses `data/sqlite/gnaf.sqlite` as `zstd`
+- publishes the compressed artifact to a dedicated Git LFS branch
+- optionally pulls that artifact back down in the deploy job, copies the SQLite file onto the Fly volume, and restarts the app machine
+
+Use a self-hosted or larger runner for that workflow. Standard GitHub-hosted runners are usually too small for a full G-NAF build because the job needs room for the downloaded archive, extracted PSV files, and the final SQLite database at the same time.
+
+Required GitHub Actions secrets and variables for the fully automated path:
+
+- secret `FLY_API_TOKEN` for Machines API start/stop calls
+- secret `FLY_SSH_TOKEN` for `fly ssh` / `fly ssh sftp` access during the copy step
+- optional secret `GNAFKIT_API_KEY` if the deployed app is header-protected
+- optional variable `GNAFKIT_API_KEY_HEADER` if the auth header is not `x-api-key`
+- optional variable `APP_BASE_URL` to run a `/health` check after DB deployment
+
+The workflow writes the compressed database to a dedicated branch such as `levi/db-artifacts` under `artifacts/latest/gnaf.sqlite.zst`, alongside `status.json`, `dataset.json`, `version.txt`, and the checksum. Each publish rotates the previous `latest` set into `artifacts/previous/`.
+
+The deploy job assumes a single Fly Machine with the database volume mounted at `/data`, downloads `artifacts/latest/gnaf.sqlite.zst` from the artifact branch, decompresses it on the runner, uploads `gnaf.sqlite` to `/data/incoming/gnaf.sqlite.next`, swaps `/data/gnaf.sqlite`, and restarts the Machine so the Bun process reopens the new database file.
+
+Use an SSH-scoped Fly token for `FLY_SSH_TOKEN`. Fly documents a separate `fly tokens create ssh -a <app>` flow for non-interactive SSH access to one app's Machines.
+
 ## Architecture
 
 The source layout is intentionally small and explicit:
@@ -141,7 +165,6 @@ SQLite is built in two layers:
 - The dataset is large. Expect the initial sync to take time and disk space.
 - The SQLite database is rebuilt atomically into a temporary file and swapped into place when import completes.
 - The importer currently targets the core PSV files required for address search and geocoding.
-- Reverse geocoding uses SQLite `rtree` plus runtime distance calculation. A full GIS extension is not required for the current scope.
 
 ## Verification
 

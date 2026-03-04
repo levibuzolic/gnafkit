@@ -15,7 +15,7 @@ export const DATASET_STATE_PATH = join(STATE_DIR, "dataset.json");
 export const DEFAULT_HOST = env.HOST ?? "127.0.0.1";
 export const DEFAULT_PORT = Number.parseInt(env.PORT ?? "3000", 10);
 export const IMPORT_BATCH_SIZE = 5_000;
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 4;
 export const SKIP_SYNC = env.GNAFKIT_SKIP_SYNC === "1";
 export const API_KEY = env.GNAFKIT_API_KEY ?? "";
 export const API_KEY_HEADER = (env.GNAFKIT_API_KEY_HEADER ?? "x-api-key").toLowerCase();

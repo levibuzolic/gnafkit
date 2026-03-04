@@ -1,0 +1,138 @@
+name: Build Database
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner_labels:
+        description: 'JSON array of runner labels. Use a self-hosted or larger runner with enough disk.'
+        required: true
+        default: '["self-hosted","linux","x64"]'
+      artifact_branch:
+        description: "Git branch used to store the compressed DB artifact in Git LFS"
+        required: true
+        default: "levi/db-artifacts"
+      deploy_to_fly:
+        description: "Deploy the freshly built DB onto the Fly volume"
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-db-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-db:
+    name: Build SQLite database artifact
+    runs-on: ${{ fromJson(inputs.runner_labels) }}
+    timeout-minutes: 360
+    outputs:
+      artifact_branch: ${{ steps.publish.outputs.artifact_branch }}
+      artifact_path: ${{ steps.publish.outputs.artifact_path }}
+      artifact_version: ${{ steps.publish.outputs.artifact_version }}
+    env:
+      BUN_INSTALL_CACHE_DIR: ~/.bun/install/cache
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install mise
+        uses: jdx/mise-action@v3
+        with:
+          cache: true
+
+      - name: Restore Bun global cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-cache-${{ hashFiles('bun.lock', 'package.json') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-cache-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Check artifact tooling
+        run: |
+          zstd --version
+          git lfs version
+
+      - name: Build latest G-NAF SQLite database
+        run: bun run sync
+
+      - name: Capture build metadata
+        run: |
+          mkdir -p dist
+          bun src/cli.mts status > dist/status.json
+          cp data/state/dataset.json dist/dataset.json
+
+      - name: Create compressed database archive
+        run: |
+          zstd -T0 -19 -f data/sqlite/gnaf.sqlite -o dist/gnaf.sqlite.zst
+          sha256sum dist/gnaf.sqlite.zst > dist/gnaf.sqlite.zst.sha256
+
+      - name: Publish database package to Git LFS artifact branch
+        id: publish
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DB_ARTIFACTS_BRANCH: ${{ inputs.artifact_branch }}
+          DB_ARTIFACT_NAME: gnaf.sqlite.zst
+        run: |
+          chmod +x scripts/publish-db-artifact-lfs.sh
+          scripts/publish-db-artifact-lfs.sh \
+            dist/gnaf.sqlite.zst \
+            dist/status.json \
+            dist/dataset.json
+
+  deploy-db:
+    name: Deploy SQLite database to Fly volume
+    runs-on: ubuntu-latest
+    needs: build-db
+    if: ${{ inputs.deploy_to_fly }}
+    env:
+      FLY_APP_NAME: gnafkit
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install deploy tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zstd git-lfs
+          git lfs install --local
+
+      - name: Checkout database artifact branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.build-db.outputs.artifact_branch }}
+          path: db-artifacts
+          lfs: true
+          fetch-depth: 1
+
+      - name: Materialize latest database artifact
+        run: |
+          git -C db-artifacts lfs pull --include="${{ needs.build-db.outputs.artifact_path }}"
+          mkdir -p dist
+          artifact_dir="db-artifacts/$(dirname "${{ needs.build-db.outputs.artifact_path }}")"
+          artifact_name="$(basename "${{ needs.build-db.outputs.artifact_path }}")"
+          (cd "$artifact_dir" && sha256sum --check "${artifact_name}.sha256")
+          zstd -d -f "db-artifacts/${{ needs.build-db.outputs.artifact_path }}" -o dist/gnaf.sqlite
+
+      - name: Install flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Deploy database archive onto Fly volume
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          FLY_SSH_TOKEN: ${{ secrets.FLY_SSH_TOKEN }}
+          APP_BASE_URL: ${{ vars.APP_BASE_URL }}
+          GNAFKIT_API_KEY: ${{ secrets.GNAFKIT_API_KEY }}
+          GNAFKIT_API_KEY_HEADER: ${{ vars.GNAFKIT_API_KEY_HEADER }}
+        run: |
+          chmod +x scripts/deploy-db-to-fly.sh
+          scripts/deploy-db-to-fly.sh dist/gnaf.sqlite

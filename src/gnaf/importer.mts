@@ -1,11 +1,12 @@
 import { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
 import { rename } from "node:fs/promises";
 import { DB_PATH, IMPORT_BATCH_SIZE, PSV_FILE_PATTERNS, SCHEMA_VERSION, SQLITE_DIR } from "../config.mts";
 import { ProgressBar, Spinner } from "../terminal/progress.mts";
 import { ensureDir, findFilesByNamePattern, pathExists, removePath } from "../utils/fs.mts";
-import { joinNonEmpty, normalizeSearchText } from "../utils/strings.mts";
+import { joinNonEmpty } from "../utils/strings.mts";
 import { streamPsvRows } from "../utils/psv.mts";
-import { INDEX_SQL, RAW_SCHEMA_SQL } from "./schema.mts";
+import { BUILD_SCHEMA_SQL, SERVE_INDEX_SQL, SERVE_SCHEMA_SQL } from "./schema.mts";
 import { syncDataset, type DatasetContext } from "./dataset.mts";
 
 /**
@@ -99,6 +100,14 @@ function openDatabase(path: string): Database {
   db.run("PRAGMA synchronous = NORMAL");
   db.run("PRAGMA temp_store = MEMORY");
   return db;
+}
+
+function sqlStringLiteral(value: string): string {
+  return `'${value.replaceAll("'", "''")}'`;
+}
+
+function hashNormalizedAddress(value: string): Uint8Array {
+  return createHash("sha256").update(value).digest().subarray(0, 8);
 }
 
 /**
@@ -444,169 +453,171 @@ async function importRawTables(db: Database, dataset: DatasetContext): Promise<v
  * while the FTS table supports prefix-style autocomplete queries.
  */
 function buildSearchSurface(db: Database): void {
-  const totalRow = db.query<{ total: number }, []>("SELECT COUNT(*) AS total FROM addresses").get();
-  const total = totalRow?.total ?? 0;
-  const progress = new ProgressBar("Building search index", total);
+  const spinner = new Spinner("Building search surface");
+  spinner.start();
 
-  const insertSearchAddress = db.prepare(
-    "INSERT OR REPLACE INTO search_addresses (address_detail_pid, full_address, normalized_address, street_name, locality_name, state_abbreviation, postcode, latitude, longitude, confidence, geocode_type_code) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-  );
-  const insertReversePoint = db.prepare(
-    "INSERT INTO reverse_geocode_points (address_detail_pid) VALUES (?)",
-  );
-  const insertReverseRtree = db.prepare(
-    "INSERT INTO reverse_geocode_rtree (id, min_longitude, max_longitude, min_latitude, max_latitude) VALUES (?, ?, ?, ?, ?)",
-  );
-  const insertSearchFts = db.prepare(
-    "INSERT INTO search_fts (address_detail_pid, full_address, street_name, locality_name, postcode) VALUES (?, ?, ?, ?, ?)",
-  );
-  const writeBatch = db.transaction(
-    (
-      rows: Array<{
-        pid: string;
-        fullAddress: string;
-        normalizedAddress: string;
-        streetName: string;
-        localityName: string;
-        stateAbbreviation: string;
-        postcode: string | null;
-        latitude: number | null;
-        longitude: number | null;
-        confidence: number | null;
-        geocodeTypeCode: string | null;
-      }>,
-    ) => {
-      for (const row of rows) {
-        insertSearchAddress.run(
-          row.pid,
-          row.fullAddress,
-          row.normalizedAddress,
-          row.streetName,
-          row.localityName,
-          row.stateAbbreviation,
-          row.postcode,
-          row.latitude,
-          row.longitude,
-          row.confidence,
-          row.geocodeTypeCode,
-        );
-        if (row.latitude !== null && row.longitude !== null) {
-          const pointInsert = insertReversePoint.run(row.pid);
-          const pointId = Number(pointInsert.lastInsertRowid);
-          insertReverseRtree.run(pointId, row.longitude, row.longitude, row.latitude, row.latitude);
-        }
-        insertSearchFts.run(
-          row.pid,
-          row.fullAddress,
-          row.streetName,
-          row.localityName,
-          row.postcode,
-        );
-      }
-    },
-  );
+  db.run(`
+    INSERT INTO search_addresses (
+      address_detail_pid,
+      full_address,
+      normalized_address,
+      normalized_address_hash,
+      street_name,
+      locality_name,
+      state_abbreviation,
+      postcode,
+      latitude,
+      longitude,
+      confidence,
+      geocode_type_code
+    )
+    WITH address_parts AS (
+      SELECT
+        a.address_detail_pid AS address_detail_pid,
+        a.building_name AS building_name,
+        a.address_site_name AS address_site_name,
+        a.flat_number AS flat_number,
+        a.level_number AS level_number,
+        a.lot_number AS lot_number,
+        CASE
+          WHEN a.number_first IS NOT NULL AND a.number_last IS NOT NULL AND a.number_first <> a.number_last THEN a.number_first || '-' || a.number_last
+          ELSE COALESCE(a.number_first, a.number_last)
+        END AS number_range,
+        s.full_street_name AS street_name,
+        l.locality_name AS locality_name,
+        st.state_abbreviation AS state_abbreviation,
+        COALESCE(a.postcode, l.primary_postcode) AS postcode,
+        g.latitude AS latitude,
+        g.longitude AS longitude,
+        a.confidence AS confidence,
+        g.geocode_type_code AS geocode_type_code
+      FROM addresses a
+      INNER JOIN streets s ON s.street_locality_pid = a.street_locality_pid
+      INNER JOIN localities l ON l.locality_pid = a.locality_pid
+      INNER JOIN states st ON st.state_pid = l.state_pid
+      LEFT JOIN geocodes g ON g.address_detail_pid = a.address_detail_pid
+    ),
+    rendered AS (
+      SELECT
+        address_detail_pid,
+        trim(
+          (CASE WHEN building_name IS NOT NULL THEN building_name || ' ' ELSE '' END) ||
+          (CASE WHEN address_site_name IS NOT NULL THEN address_site_name || ' ' ELSE '' END) ||
+          (CASE WHEN level_number IS NOT NULL THEN 'LEVEL ' || level_number || ' ' ELSE '' END) ||
+          (CASE WHEN flat_number IS NOT NULL THEN 'FLAT ' || flat_number || ' ' ELSE '' END) ||
+          (CASE WHEN lot_number IS NOT NULL THEN 'LOT ' || lot_number || ' ' ELSE '' END) ||
+          trim(COALESCE(number_range || ' ', '') || street_name) || ' ' ||
+          locality_name || ' ' ||
+          state_abbreviation ||
+          (CASE WHEN postcode IS NOT NULL THEN ' ' || postcode ELSE '' END)
+        ) AS full_address,
+        street_name,
+        locality_name,
+        state_abbreviation,
+        postcode,
+        latitude,
+        longitude,
+        confidence,
+        geocode_type_code
+      FROM address_parts
+    )
+    SELECT
+      address_detail_pid,
+      full_address,
+      trim(
+        replace(replace(replace(replace(replace(replace(replace(lower(full_address), '-', ' '), '/', ' '), ',', ' '), '.', ' '), '(', ' '), ')', ' '), '  ', ' ')
+      ) AS normalized_address,
+      zeroblob(8) AS normalized_address_hash,
+      street_name,
+      locality_name,
+      state_abbreviation,
+      postcode,
+      latitude,
+      longitude,
+      confidence,
+      geocode_type_code
+    FROM rendered
+  `);
 
-  const selectRows = db.query<
-    {
-      addressDetailPid: string;
-      buildingName: string | null;
-      addressSiteName: string | null;
-      flatNumber: string | null;
-      levelNumber: string | null;
-      lotNumber: string | null;
-      numberFirst: string | null;
-      numberLast: string | null;
-      streetName: string;
-      localityName: string;
-      stateAbbreviation: string;
-      postcode: string | null;
-      latitude: number | null;
-      longitude: number | null;
-      confidence: number | null;
-      geocodeTypeCode: string | null;
-    },
-    []
-  >(
-    `SELECT
-      a.address_detail_pid AS addressDetailPid,
-      a.building_name AS buildingName,
-      a.address_site_name AS addressSiteName,
-      a.flat_number AS flatNumber,
-      a.level_number AS levelNumber,
-      a.lot_number AS lotNumber,
-      a.number_first AS numberFirst,
-      a.number_last AS numberLast,
-      s.full_street_name AS streetName,
-      l.locality_name AS localityName,
-      st.state_abbreviation AS stateAbbreviation,
-      COALESCE(a.postcode, l.primary_postcode) AS postcode,
-      g.latitude AS latitude,
-      g.longitude AS longitude,
-      a.confidence AS confidence,
-      g.geocode_type_code AS geocodeTypeCode
-    FROM addresses a
-    INNER JOIN streets s ON s.street_locality_pid = a.street_locality_pid
-    INNER JOIN localities l ON l.locality_pid = a.locality_pid
-    INNER JOIN states st ON st.state_pid = l.state_pid
-    LEFT JOIN geocodes g ON g.address_detail_pid = a.address_detail_pid`,
-  );
+  const updateHash = db.prepare("UPDATE search_addresses SET normalized_address_hash = ? WHERE rowid = ?");
+  const updateHashes = db.transaction((rows: Array<{ rowid: number; normalizedAddress: string }>) => {
+    for (const row of rows) {
+      updateHash.run(hashNormalizedAddress(row.normalizedAddress), row.rowid);
+    }
+  });
 
-  let processed = 0;
-  let batch: Array<{
-    pid: string;
-    fullAddress: string;
-    normalizedAddress: string;
-    streetName: string;
-    localityName: string;
-    stateAbbreviation: string;
-    postcode: string | null;
-    latitude: number | null;
-    longitude: number | null;
-    confidence: number | null;
-    geocodeTypeCode: string | null;
-  }> = [];
-
-  for (const row of selectRows.iterate()) {
-    const fullAddress = composeAddress({
-      buildingName: row.buildingName,
-      addressSiteName: row.addressSiteName,
-      flatNumber: row.flatNumber,
-      levelNumber: row.levelNumber,
-      lotNumber: row.lotNumber,
-      numberRange: composeRange(row.numberFirst, row.numberLast),
-      streetName: row.streetName,
-      localityName: row.localityName,
-      stateAbbreviation: row.stateAbbreviation,
-      postcode: row.postcode,
-    });
-
-    batch.push({
-      pid: row.addressDetailPid,
-      fullAddress,
-      normalizedAddress: normalizeSearchText(fullAddress),
-      streetName: row.streetName,
-      localityName: row.localityName,
-      stateAbbreviation: row.stateAbbreviation,
-      postcode: row.postcode,
-      latitude: row.latitude,
-      longitude: row.longitude,
-      confidence: row.confidence,
-      geocodeTypeCode: row.geocodeTypeCode,
-    });
-
-    processed += 1;
+  let batch: Array<{ rowid: number; normalizedAddress: string }> = [];
+  for (const row of db.query<{ rowid: number; normalizedAddress: string }, []>(
+    "SELECT rowid, normalized_address AS normalizedAddress FROM search_addresses",
+  ).iterate()) {
+    batch.push(row);
     if (batch.length >= IMPORT_BATCH_SIZE) {
-      writeBatch(batch);
+      updateHashes(batch);
       batch = [];
-      progress.update(processed);
     }
   }
 
   if (batch.length > 0) {
-    writeBatch(batch);
+    updateHashes(batch);
   }
 
-  progress.finish();
+  spinner.stop("done");
+}
+
+function emitServeDatabase(buildDbPath: string, serveDbPath: string): void {
+  const spinner = new Spinner("Emitting serve-only database");
+  spinner.start();
+
+  const serveDb = openDatabase(serveDbPath);
+  try {
+    serveDb.run(SERVE_SCHEMA_SQL);
+    serveDb.run(`ATTACH DATABASE ${sqlStringLiteral(buildDbPath)} AS build`);
+
+    serveDb.run("INSERT INTO metadata (key, value) SELECT key, value FROM build.metadata");
+    serveDb.run(`
+      INSERT INTO search_addresses (
+        address_detail_pid,
+        full_address,
+        normalized_address,
+        normalized_address_hash,
+        street_name,
+        locality_name,
+        state_abbreviation,
+        postcode,
+        latitude,
+        longitude,
+        confidence,
+        geocode_type_code
+      )
+      SELECT
+        address_detail_pid,
+        full_address,
+        normalized_address,
+        normalized_address_hash,
+        street_name,
+        locality_name,
+        state_abbreviation,
+        postcode,
+        latitude,
+        longitude,
+        confidence,
+        geocode_type_code
+      FROM build.search_addresses
+    `);
+    serveDb.run(SERVE_INDEX_SQL);
+    serveDb.run(`
+      INSERT INTO search_fts(rowid, full_address, street_name, locality_name, postcode)
+      SELECT rowid, full_address, street_name, locality_name, postcode
+      FROM search_addresses
+    `);
+    serveDb.run("DETACH DATABASE build");
+    serveDb.run("PRAGMA wal_checkpoint(TRUNCATE)");
+    serveDb.run("PRAGMA journal_mode = DELETE");
+  } finally {
+    serveDb.close();
+  }
+
+  spinner.stop("done");
 }
 
 /**
@@ -618,18 +629,19 @@ function buildSearchSurface(db: Database): void {
  */
 async function rebuildDatabase(dataset: DatasetContext): Promise<void> {
   await ensureDir(SQLITE_DIR);
-  const temporaryDbPath = `${DB_PATH}.tmp`;
-  await removePath(temporaryDbPath);
+  const temporaryBuildDbPath = `${DB_PATH}.build.tmp`;
+  const temporaryServeDbPath = `${DB_PATH}.tmp`;
+  await removePath(temporaryBuildDbPath);
+  await removePath(temporaryServeDbPath);
 
   const spinner = new Spinner("Preparing SQLite schema");
   spinner.start();
-  const db = openDatabase(temporaryDbPath);
-  db.run(RAW_SCHEMA_SQL);
+  const db = openDatabase(temporaryBuildDbPath);
+  db.run(BUILD_SCHEMA_SQL);
   spinner.stop("done");
 
   await importRawTables(db, dataset);
   buildSearchSurface(db);
-  db.run(INDEX_SQL);
   db.prepare("INSERT INTO metadata (key, value) VALUES (?, ?)").run("resource_id", dataset.resource.id);
   db.prepare("INSERT INTO metadata (key, value) VALUES (?, ?)").run("resource_name", dataset.resource.name);
   db.prepare("INSERT INTO metadata (key, value) VALUES (?, ?)").run("imported_at", new Date().toISOString());
@@ -638,8 +650,10 @@ async function rebuildDatabase(dataset: DatasetContext): Promise<void> {
   db.run("PRAGMA journal_mode = DELETE");
   db.close();
 
+  emitServeDatabase(temporaryBuildDbPath, temporaryServeDbPath);
   await removePath(DB_PATH);
-  await rename(temporaryDbPath, DB_PATH);
+  await rename(temporaryServeDbPath, DB_PATH);
+  await removePath(temporaryBuildDbPath);
 }
 
 /**

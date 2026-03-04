@@ -1,8 +1,9 @@
 import { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { DB_PATH, SCHEMA_VERSION } from "../config.mts";
 import { ensureDir, pathExists, removePath, writeJsonFile } from "../utils/fs.mts";
-import { INDEX_SQL, RAW_SCHEMA_SQL } from "../gnaf/schema.mts";
+import { SERVE_INDEX_SQL, SERVE_SCHEMA_SQL } from "../gnaf/schema.mts";
 
 const FIXTURE_DIR = join(process.cwd(), "test", "fixtures");
 const FIXTURE_DB_PATH = join(FIXTURE_DIR, "query-fixture.sqlite");
@@ -72,12 +73,6 @@ interface QueryFixtureManifest {
       query: string;
       expectedFirst: string;
     };
-    reverseGeocode: {
-      latitude: number;
-      longitude: number;
-      expectedAny: string[];
-      maxDistanceMeters: number;
-    };
   };
 }
 
@@ -132,10 +127,6 @@ async function exportQueryFixture(): Promise<void> {
       throw new Error(`Fixture export query returned only ${rows.length} rows; expected at least 10 rows.`);
     }
 
-    const reverseSample = requireRow(
-      rows.find((row) => row.fullAddress === "106-120 COLLINS STREET MELBOURNE VIC 3000"),
-      "Fixture export query did not include the expected reverse-geocode sample row.",
-    );
     const geocodeSample = requireRow(
       rows.find((row) => row.fullAddress === "FLAT 1 120 COLLINS STREET MELBOURNE VIC 3000"),
       "Fixture export query did not include the expected geocode sample row.",
@@ -148,8 +139,8 @@ async function exportQueryFixture(): Promise<void> {
 
     const fixtureDb = new Database(FIXTURE_DB_PATH, { create: true, strict: true });
     try {
-      fixtureDb.run(RAW_SCHEMA_SQL);
-      fixtureDb.run(INDEX_SQL);
+      fixtureDb.run(SERVE_SCHEMA_SQL);
+      fixtureDb.run(SERVE_INDEX_SQL);
 
       const insertMetadata = fixtureDb.prepare("INSERT INTO metadata (key, value) VALUES (?, ?)");
       insertMetadata.run("schema_version", String(SCHEMA_VERSION));
@@ -158,25 +149,19 @@ async function exportQueryFixture(): Promise<void> {
       insertMetadata.run("imported_at", new Date().toISOString());
 
       const insertSearchAddress = fixtureDb.prepare(
-        "INSERT INTO search_addresses (address_detail_pid, full_address, normalized_address, street_name, locality_name, state_abbreviation, postcode, latitude, longitude, confidence, geocode_type_code) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO search_addresses (address_detail_pid, full_address, normalized_address, normalized_address_hash, street_name, locality_name, state_abbreviation, postcode, latitude, longitude, confidence, geocode_type_code) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       );
       const insertSearchFts = fixtureDb.prepare(
-        "INSERT INTO search_fts (address_detail_pid, full_address, street_name, locality_name, postcode) VALUES (?, ?, ?, ?, ?)",
-      );
-      const insertReversePoint = fixtureDb.prepare(
-        "INSERT INTO reverse_geocode_points (id, address_detail_pid) VALUES (?, ?)",
-      );
-      const insertReverseRtree = fixtureDb.prepare(
-        "INSERT INTO reverse_geocode_rtree (id, min_longitude, max_longitude, min_latitude, max_latitude) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO search_fts (rowid, full_address, street_name, locality_name, postcode) VALUES (?, ?, ?, ?, ?)",
       );
 
       const writeRows = fixtureDb.transaction((fixtureRows: FixtureAddressRow[]) => {
-        let reverseId = 1;
         for (const row of fixtureRows) {
-          insertSearchAddress.run(
+          const searchAddressInsert = insertSearchAddress.run(
             row.addressDetailPid,
             row.fullAddress,
             row.normalizedAddress,
+            createHash("sha256").update(row.normalizedAddress).digest().subarray(0, 8),
             row.streetName,
             row.localityName,
             row.stateAbbreviation,
@@ -186,19 +171,14 @@ async function exportQueryFixture(): Promise<void> {
             row.confidence,
             row.geocodeTypeCode,
           );
+          const searchAddressRowid = Number(searchAddressInsert.lastInsertRowid);
           insertSearchFts.run(
-            row.addressDetailPid,
+            searchAddressRowid,
             row.fullAddress,
             row.streetName,
             row.localityName,
             row.postcode,
           );
-
-          if (row.latitude !== null && row.longitude !== null) {
-            insertReversePoint.run(reverseId, row.addressDetailPid);
-            insertReverseRtree.run(reverseId, row.longitude, row.longitude, row.latitude, row.latitude);
-            reverseId += 1;
-          }
         }
       });
 
@@ -226,15 +206,6 @@ async function exportQueryFixture(): Promise<void> {
         geocode: {
           query: geocodeSample.fullAddress,
           expectedFirst: geocodeSample.fullAddress,
-        },
-        reverseGeocode: {
-          latitude: requireRow(reverseSample.latitude, "Reverse-geocode sample row is missing latitude."),
-          longitude: requireRow(reverseSample.longitude, "Reverse-geocode sample row is missing longitude."),
-          expectedAny: [
-            "106-120 COLLINS STREET MELBOURNE VIC 3000",
-            "FLAT 1 120 COLLINS STREET MELBOURNE VIC 3000",
-          ],
-          maxDistanceMeters: 20,
         },
       },
     };

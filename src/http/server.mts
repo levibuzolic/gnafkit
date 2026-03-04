@@ -1,5 +1,5 @@
 import { API_KEY, API_KEY_HEADER, DEFAULT_HOST, DEFAULT_PORT } from "../config.mts";
-import { autocomplete, geocode, openReadonlyDatabase, readDatabaseMetadata, reverseGeocode } from "../gnaf/queries.mts";
+import { autocomplete, geocode, openReadonlyDatabase, readDatabaseMetadata } from "../gnaf/queries.mts";
 import { homepageResponse } from "./homepage.mts";
 
 /**
@@ -95,26 +95,10 @@ export function startServer(options: ServerOptions = {}): void {
         });
       }
 
-      if (url.pathname === "/reverse-geocode") {
-        const latitude = Number.parseFloat(url.searchParams.get("lat") ?? "");
-        const longitude = Number.parseFloat(url.searchParams.get("lng") ?? "");
-        const limit = Number.parseInt(url.searchParams.get("limit") ?? "5", 10);
-
-        if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
-          return badRequest("Missing or invalid required query parameters: lat, lng");
-        }
-
-        return json({
-          latitude,
-          longitude,
-          results: reverseGeocode(db, latitude, longitude, Number.isFinite(limit) ? Math.min(Math.max(limit, 1), 20) : 5),
-        });
-      }
-
       return json(
         {
           service: "gnafkit",
-          endpoints: ["/health", "/autocomplete?q=...", "/geocode?q=...", "/reverse-geocode?lat=...&lng=..."],
+          endpoints: ["/health", "/autocomplete?q=...", "/geocode?q=..."],
         },
         { status: 404 },
       );
