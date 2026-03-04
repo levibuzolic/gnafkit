@@ -1,0 +1,12 @@
+node_modules
+.git
+.DS_Store
+data
+coverage
+*.log
+test
+.vscode
+.idea
+CLAUDE.md
+AGENTS.md
+README.md

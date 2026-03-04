@@ -1,4 +1,4 @@
-import { DB_PATH, DEFAULT_HOST, DEFAULT_PORT } from "./config.mts";
+import { DB_PATH, DEFAULT_HOST, DEFAULT_PORT, SKIP_SYNC } from "./config.mts";
 import { readDatasetState, syncDataset } from "./gnaf/dataset.mts";
 import { ensureDatabaseReady } from "./gnaf/importer.mts";
 import { openReadonlyDatabase, readDatabaseMetadata } from "./gnaf/queries.mts";
@@ -14,6 +14,10 @@ interface ParsedArgs {
   forceImport: boolean;
   host?: string;
   port?: number;
+}
+
+function shouldSkipSync(command: string): boolean {
+  return SKIP_SYNC && command === "serve";
 }
 
 /**
@@ -81,6 +85,7 @@ Usage:
 
 Commands:
   serve   Ensure the latest dataset is ready, then start the HTTP API.
+          Set GNAFKIT_SKIP_SYNC=1 to skip dataset sync/import and serve an existing DB_PATH directly.
   sync    Download/extract the latest dataset and import it if required.
   update  Alias of sync.
   redownload  Force a fresh dataset download and database rebuild.
@@ -127,10 +132,17 @@ async function main(): Promise<void> {
 
   switch (args.command) {
     case "serve":
-      await ensureDatabaseReady({
-        forceDownload: args.forceDownload,
-        forceImport: args.forceImport,
-      });
+      if (shouldSkipSync(args.command)) {
+        if (!(await pathExists(DB_PATH))) {
+          throw new Error(`Configured database not found at ${DB_PATH}. Disable GNAFKIT_SKIP_SYNC or provide GNAFKIT_DB_PATH.`);
+        }
+      } else {
+        await ensureDatabaseReady({
+          forceDownload: args.forceDownload,
+          forceImport: args.forceImport,
+        });
+      }
+
       startServer({
         host: args.host ?? DEFAULT_HOST,
         port: args.port ?? DEFAULT_PORT,

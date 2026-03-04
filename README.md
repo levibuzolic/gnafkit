@@ -86,6 +86,39 @@ curl 'http://127.0.0.1:3000/geocode?q=120%20Collins%20Street%20Melbourne%20VIC%2
 curl 'http://127.0.0.1:3000/reverse-geocode?lat=-37.81409&lng=144.96898'
 ```
 
+## Deployment Notes
+
+For production deployments that serve a prebuilt read-only SQLite database:
+
+- set `GNAFKIT_DB_PATH` to the mounted database path
+- set `GNAFKIT_SKIP_SYNC=1` so `serve` does not download/import on startup
+- optionally set `GNAFKIT_API_KEY` to require a matching request header on every request
+- optionally set `GNAFKIT_API_KEY_HEADER` to rename the header, defaulting to `x-api-key`
+- ensure the SQLite file already exists at that path before the process starts
+
+Fly.io example values used by this repo's `fly.toml`:
+
+```text
+GNAFKIT_DB_PATH=/data/gnaf.sqlite
+GNAFKIT_SKIP_SYNC=1
+```
+
+Example protected request:
+
+```bash
+curl -H 'x-api-key: your-secret-key' 'https://your-app.fly.dev/health'
+```
+
+If `GNAFKIT_API_KEY` is set, the homepage at `/` is protected too. That means a normal browser visit will be rejected unless the header is injected by a proxy, browser extension, or an API client.
+
+The included `Dockerfile` starts:
+
+```bash
+bun src/cli.mts serve --host 0.0.0.0 --port ${PORT:-3000}
+```
+
+That means local development still uses the normal sync/import workflow, while deployment can mount a prebuilt database directly.
+
 ## Architecture
 
 The source layout is intentionally small and explicit:

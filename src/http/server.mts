@@ -1,5 +1,6 @@
-import { DEFAULT_HOST, DEFAULT_PORT } from "../config.mts";
+import { API_KEY, API_KEY_HEADER, DEFAULT_HOST, DEFAULT_PORT } from "../config.mts";
 import { autocomplete, geocode, openReadonlyDatabase, readDatabaseMetadata, reverseGeocode } from "../gnaf/queries.mts";
+import { homepageResponse } from "./homepage.mts";
 
 /**
  * Bind options for the Bun HTTP server.
@@ -28,6 +29,18 @@ function badRequest(message: string): Response {
   return json({ error: message }, { status: 400 });
 }
 
+function unauthorized(): Response {
+  return json({ error: `Unauthorized. Provide the configured ${API_KEY_HEADER} header.` }, { status: 401 });
+}
+
+function isAuthorized(request: Request): boolean {
+  if (!API_KEY) {
+    return true;
+  }
+
+  return request.headers.get(API_KEY_HEADER) === API_KEY;
+}
+
 /**
  * Starts the Bun HTTP server that fronts the SQLite-backed geocoding API.
  *
@@ -45,6 +58,14 @@ export function startServer(options: ServerOptions = {}): void {
     port,
     fetch(request) {
       const url = new URL(request.url);
+
+      if (!isAuthorized(request)) {
+        return unauthorized();
+      }
+
+      if (url.pathname === "/") {
+        return homepageResponse();
+      }
 
       if (url.pathname === "/health") {
         return json({
